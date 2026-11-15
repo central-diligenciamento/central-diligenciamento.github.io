@@ -303,6 +303,7 @@ table.tabela { width: 100%; border-collapse: collapse; font-size: 13px; }
 .faixa-alerta.alta { background: var(--perigo-f); color: var(--perigo); }
 .faixa-alerta.media { background: var(--aviso-f); color: var(--aviso); }
 .faixa-alerta.info { background: var(--info-f); color: var(--info); }
+.faixa-alerta.ok { background: var(--ok-f); color: var(--ok); }
 .faixa-alerta ul { margin: 4px 0 0; padding-left: 18px; }
 .faixa-alerta a { color: inherit; text-decoration: underline; }
 .faixa-alerta > svg { width: 20px; height: 20px; flex: none; }
@@ -473,6 +474,21 @@ body.dili-arrastando, body.dili-arrastando * { cursor: grabbing !important; user
   .corpo-app, .md { display: block; }
   .cartao { box-shadow: none; break-inside: avoid; }
 }
+
+/* Carregar IBED: área para anexar o PDF */
+.zona-arquivo { display: grid; justify-items: center; gap: 6px; text-align: center; padding: 26px 18px; border: 2px dashed var(--linha); border-radius: 16px; cursor: pointer; background: var(--fundo-suave); transition: border-color .15s, background .15s; }
+.zona-arquivo:hover, .zona-arquivo.sobre { border-color: var(--p); background: color-mix(in srgb, var(--p) 8%, var(--cartao)); }
+.zona-arquivo .zona-ic { width: 46px; height: 46px; border-radius: 14px; display: grid; place-items: center; background: var(--p-preench); color: #fff; }
+.zona-arquivo .zona-ic svg { width: 22px; height: 22px; }
+.zona-arquivo.lendo { opacity: .7; pointer-events: none; }
+.zona-arquivo.lendo .zona-ic { animation: pulsar 1s infinite alternate; }
+@keyframes pulsar { to { transform: scale(.88); } }
+.ibed-previa-tab { max-height: 300px; overflow: auto; border: 1px solid var(--linha); border-radius: 12px; }
+.ibed-previa-tab table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+.ibed-previa-tab td { padding: 6px 12px; border-bottom: 1px solid var(--linha); vertical-align: top; }
+.ibed-previa-tab td:first-child { color: var(--texto-2); width: 42%; }
+.ibed-previa-tab tr.sec td { background: var(--fundo-suave); font-weight: 700; color: var(--p); position: sticky; top: 0; }
+.ibed-colar summary { cursor: pointer; }
 </style>
 </head>
 <body>
@@ -2160,6 +2176,41 @@ function lerTextoIbed(t) {
 
 /** Normaliza o número do lote para comparar ("0012" = "12"). */
 function chaveLote(s) { return String(s ?? "").trim().replace(/^0+(?=.)/, "").toUpperCase(); }
+
+// ---------------------------------------------------------------------
+// Leitura direta do PDF da IBED (pdf.js, carregado só quando usado).
+// O texto sai na ordem do conteúdo do PDF, a mesma do "copiar tudo",
+// e passa pelos mesmos regex de lerTextoIbed.
+let _pdfjs = null;
+async function carregarPdfjs() {
+  if (_pdfjs) return _pdfjs;
+  const base = new URL("vendor/pdfjs/", location.href).href;
+  const lib = await import(base + "pdf.min.mjs");
+  lib.GlobalWorkerOptions.workerSrc = base + "pdf.worker.min.mjs";
+  _pdfjs = lib;
+  return lib;
+}
+async function textoDoPdf(arquivo) {
+  const pdfjs = await carregarPdfjs();
+  const tarefa = pdfjs.getDocument({ data: new Uint8Array(await arquivo.arrayBuffer()) });
+  const doc = await tarefa.promise;
+  let txt = "";
+  for (let i = 1; i <= doc.numPages; i++) {
+    const c = await (await doc.getPage(i)).getTextContent();
+    let y = null;
+    for (const it of c.items) {
+      const yi = it.transform?.[5];
+      // Quebra de linha quando o texto muda de altura (o PDF nem sempre marca o fim da linha).
+      if (y != null && yi != null && Math.abs(yi - y) > 2 && !txt.endsWith("\n") && it.str.trim()) txt += "\n";
+      txt += it.str;
+      if (yi != null && it.str.trim()) y = yi;
+      if (it.hasEOL && !txt.endsWith("\n")) txt += "\n";
+    }
+    txt += "\n";
+  }
+  try { await tarefa.destroy(); } catch { /* só libera memória */ }
+  return txt;
+}
 
 // ---- dados.js ----
 // =====================================================================
@@ -3930,28 +3981,73 @@ function modalLote(t, origem) {
   });
 }
 
-/** "Carregar IBED": cola o texto do PDF, extrai os campos e salva no lote. */
+/** "Carregar IBED": anexa o PDF (ou cola o texto), lê os campos e salva no lote. */
 function modalCarregarIbed(t, loteSel) {
   const corpo = `
-    <div class="faixa-alerta info" style="margin-bottom:12px">${icone("upload")}<div>Abra o PDF da IBED, pressione <b>Ctrl+A</b>, <b>Ctrl+C</b> e cole aqui (<b>Ctrl+V</b>). ${loteSel ? `Os dados vão para o <b>Lote ${esc(loteSel.campos.Title ?? "")}</b> (selecionado).` : "Um lote novo é criado com o número que estiver na IBED."}</div></div>
-    <textarea class="campo" id="ibed-txt" style="min-height:240px;font-family:Consolas,monospace;font-size:12px" placeholder="Cole aqui o texto da IBED…"></textarea>
-    <div id="ibed-previa" class="fraco" style="margin-top:8px"></div>`;
-  const m = abrirModal({ titulo: "Carregar IBED", corpo, largura: 760, rodape: `<button class="btn" data-fechar>Cancelar</button>${loteSel ? `<button class="btn" data-x="novo">Criar lote novo</button>` : ""}<button class="btn prim" data-x="salvar">Extrair e salvar</button>` });
+    <label class="zona-arquivo" id="ibed-zona">
+      <input type="file" id="ibed-arquivo" accept="application/pdf,.pdf" hidden>
+      <span class="zona-ic">${icone("upload")}</span>
+      <b id="ibed-zona-tit">Arraste o PDF da IBED aqui ou clique para escolher</b>
+      <span class="fraco" id="ibed-zona-sub">O app lê o documento e preenche todos os campos automaticamente. Os dados vão para o lote com o número que estiver na IBED (se ainda não existir, ele é criado).</span>
+    </label>
+    <div id="ibed-previa" style="margin-top:12px"></div>
+    <details class="ibed-colar" style="margin-top:10px"><summary class="fraco">Prefere colar o texto? (Ctrl+A, Ctrl+C no PDF e Ctrl+V aqui)</summary>
+      <textarea class="campo" id="ibed-txt" style="min-height:200px;margin-top:8px;font-family:Consolas,monospace;font-size:12px" placeholder="Cole aqui o texto da IBED…"></textarea>
+    </details>`;
+  const m = abrirModal({ titulo: "Carregar IBED", corpo, largura: 780, rodape: `<button class="btn" data-fechar>Cancelar</button><button class="btn prim" data-x="salvar" disabled>Salvar no lote</button>` });
   const ta = m.querySelector("#ibed-txt");
-  ta.oninput = () => {
-    const v = lerTextoIbed(ta.value);
-    const n = Object.values(v).filter((x) => x != null && x !== "").length;
-    m.querySelector("#ibed-previa").innerHTML = ta.value.trim() ? `${n} campo(s) reconhecido(s)${v.cd_solicitante ? ` · Solicitação <b>${esc(v.cd_solicitante)}</b>` : ""}${v.Title ? ` · Lote <b>${esc(v.Title)}</b>` : ""}${v.cd_zoneamento ? ` · Zoneamento ${esc(v.cd_zoneamento)}` : ""}` : "";
+  const zona = m.querySelector("#ibed-zona");
+  const btSalvar = m.querySelector('[data-x="salvar"]');
+  // Para onde vai a IBED: o lote selecionado, se for o mesmo número; senão o lote
+  // deste terreno com o número que está na IBED; se não existir, um lote novo.
+  const destinoIbed = (v) => {
+    const k = chaveLote(v.Title);
+    if (loteSel && (!k || !chaveLote(loteSel.campos.Title) || chaveLote(loteSel.campos.Title) === k)) return loteSel;
+    return (k && estado.base.lotes.find((l) => l.terrenoId === t.id && chaveLote(l.campos.Title) === k)) || null;
   };
-  const salvar = async (forcarNovo) => {
+  const previa = () => {
+    const v = lerTextoIbed(ta.value);
+    const achados = IBED_CAMPOS.filter((c) => v[c.col] != null && v[c.col] !== "");
+    const ok = !!v.cd_solicitante;
+    btSalvar.disabled = !ok;
+    if (!ta.value.trim()) { m.querySelector("#ibed-previa").innerHTML = ""; return; }
+    if (!ok) { m.querySelector("#ibed-previa").innerHTML = `<div class="faixa-alerta alta">Não reconheci este documento como uma IBED (número da solicitação não encontrado).</div>`; return; }
+    const linhas = IBED_SECOES.map((sec) => {
+      const cs = sec.campos.filter(([, col]) => v[col] != null && v[col] !== "");
+      if (!cs.length) return "";
+      return `<tr class="sec"><td colspan="2">${esc(sec.titulo)}</td></tr>` + cs.map(([rot, col]) => `<tr><td>${esc(rot)}</td><td>${esc(String(v[col]))}</td></tr>`).join("");
+    }).join("");
+    m.querySelector("#ibed-previa").innerHTML = `
+      <div class="faixa-alerta ok" style="margin-bottom:8px">${icone("brilho")}<div><b>${achados.length} de ${IBED_CAMPOS.length} campos</b> lidos · Solicitação <b>${esc(v.cd_solicitante)}</b>${v.Title ? ` · Lote <b>${esc(v.Title)}</b>` : ""}${v.cd_zoneamento ? ` · ${esc(v.cd_zoneamento)}` : ""}.<br>${(() => { const d = destinoIbed(v); return d ? `Vai atualizar o <b>Lote ${esc(d.campos.Title ?? "")}</b>, que já existe neste terreno.` : `Vai criar o <b>Lote ${esc(v.Title ?? "")}</b> neste terreno.`; })()} Confira antes de salvar.</div></div>
+      <div class="ibed-previa-tab"><table>${linhas}</table></div>`;
+  };
+  ta.oninput = previa;
+  const lerArquivo = async (arq) => {
+    if (!arq) return;
+    if (!/\.pdf$/i.test(arq.name) && arq.type !== "application/pdf") { aviso("Escolha o arquivo PDF da IBED.", "erro"); return; }
+    zona.classList.add("lendo");
+    m.querySelector("#ibed-zona-tit").textContent = `Lendo ${arq.name}…`;
+    try {
+      ta.value = await textoDoPdf(arq);
+      m.querySelector("#ibed-zona-tit").textContent = arq.name;
+      m.querySelector("#ibed-zona-sub").textContent = "Clique ou arraste outro PDF para trocar.";
+      previa();
+    } catch (e) {
+      console.error(e);
+      m.querySelector("#ibed-zona-tit").textContent = "Arraste o PDF da IBED aqui ou clique para escolher";
+      aviso("Não consegui ler este PDF aqui. Use a opção de colar o texto, logo abaixo.", "erro");
+      m.querySelector(".ibed-colar").open = true;
+    } finally { zona.classList.remove("lendo"); }
+  };
+  m.querySelector("#ibed-arquivo").onchange = (e) => lerArquivo(e.target.files[0]);
+  zona.addEventListener("dragover", (e) => { e.preventDefault(); zona.classList.add("sobre"); });
+  zona.addEventListener("dragleave", () => zona.classList.remove("sobre"));
+  zona.addEventListener("drop", (e) => { e.preventDefault(); zona.classList.remove("sobre"); lerArquivo(e.dataTransfer.files[0]); });
+  const salvar = async () => {
     const v = lerTextoIbed(ta.value);
     if (!v.cd_solicitante) { aviso("Não reconheci o texto como uma IBED (número da solicitação não encontrado). Confira se copiou o PDF inteiro (Ctrl+A, Ctrl+C).", "erro"); return; }
-    const alvoSel = forcarNovo ? null : loteSel;
-    if (alvoSel && v.Title && chaveLote(alvoSel.campos.Title) && chaveLote(alvoSel.campos.Title) !== chaveLote(v.Title)) {
-      aviso(`Esta IBED é do Lote ${v.Title}, mas o lote selecionado é o ${alvoSel.campos.Title}. Selecione o lote correto (ou use "Criar lote novo").`, "erro"); return;
-    }
-    if (!alvoSel && !v.Title) { aviso("Não encontrei o número do lote na IBED. Selecione o lote na lista antes de carregar.", "erro"); return; }
-    const existente = alvoSel ?? estado.base.lotes.find((l) => l.terrenoId === t.id && chaveLote(l.campos.Title) === chaveLote(v.Title)) ?? null;
+    if (!v.Title && !loteSel) { aviso("Não encontrei o número do lote na IBED. Selecione o lote na lista antes de carregar.", "erro"); return; }
+    const existente = destinoIbed(v);
     const campos = {};
     for (const c of IBED_CAMPOS) {
       const novo = v[c.col];
@@ -3965,8 +4061,7 @@ function modalCarregarIbed(t, loteSel) {
     }, `IBED ${v.cd_solicitante} salva no Lote ${campos.Title}. Confira os campos.`);
     if (ok) fecharModal();
   };
-  m.querySelector('[data-x="salvar"]').onclick = () => salvar(false);
-  m.querySelector('[data-x="novo"]')?.addEventListener("click", () => salvar(true));
+  btSalvar.onclick = () => salvar();
 }
 
 // ---- processos.js ----
