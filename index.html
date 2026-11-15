@@ -431,6 +431,9 @@ button.passo:hover .circ { box-shadow: 0 0 0 5px var(--p-suave); }
 
 /* Dili · assistente */
 .dili-botao { position: fixed; right: 22px; bottom: 22px; z-index: 50; width: 58px; height: 58px; border-radius: 50%; border: 0; cursor: pointer; background: linear-gradient(135deg, var(--gA), var(--gB) 60%, var(--gC)); color: #fff; box-shadow: 0 12px 30px rgba(60, 30, 90, .35); display: grid; place-items: center; }
+.dili-botao { touch-action: none; user-select: none; }
+.dili header { cursor: grab; touch-action: none; user-select: none; }
+body.dili-arrastando, body.dili-arrastando * { cursor: grabbing !important; user-select: none !important; }
 .dili-botao svg { width: 26px; height: 26px; }
 .dili { background: var(--cartao); position: fixed; right: 22px; bottom: 92px; z-index: 50; width: min(400px, calc(100vw - 32px)); height: min(560px, calc(100vh - 120px)); display: grid; grid-template-rows: auto 1fr auto; overflow: hidden; animation: entra .2s; }
 .dili header { padding: 14px 16px; display: flex; gap: 12px; align-items: center; background: linear-gradient(135deg, var(--gA), var(--gB) 60%, var(--gC)); color: #fff; }
@@ -5079,22 +5082,88 @@ function paginaAgenda() {
 const dili = { aberto: false, msgs: [] };
 const DILI_SUG = ["Resumo geral", "O que está vencido?", "Prazos desta semana", "Terrenos com maior risco", "O que falta abrir?", "Como está o terreno…"];
 
+// Posição da Dili: distância do botão até a direita/base da janela (arrastável, salva no navegador).
+const DILI_POS_PADRAO = { r: 22, b: 22 };
+function diliPos() {
+  const p = armazem.ler("cd.dili.pos", DILI_POS_PADRAO);
+  const t = 58, m = 8;
+  return {
+    r: Math.min(Math.max(+p.r || 0, m), Math.max(m, innerWidth - t - m)),
+    b: Math.min(Math.max(+p.b || 0, m), Math.max(m, innerHeight - t - m)),
+  };
+}
+function diliNoInicio() {
+  const r = location.hash.replace(/^#\/?/, "").split(/[/?]/)[0];
+  return r === "" || r === "inicio";
+}
+function posicionarDili() {
+  const raiz = $("#dili-raiz"); if (!raiz) return;
+  const bt = raiz.querySelector(".dili-botao"); if (!bt) return;
+  const p = diliPos();
+  bt.style.right = p.r + "px"; bt.style.bottom = p.b + "px";
+  const painel = raiz.querySelector(".dili"); if (!painel) return;
+  const rb = bt.getBoundingClientRect(), w = painel.offsetWidth, h = painel.offsetHeight, m = 12, g = 12;
+  const limitar = (v, max) => Math.min(Math.max(v, m), Math.max(m, max - m));
+  let left, top;
+  if (rb.top - h - g >= m) { top = rb.top - h - g; left = limitar(rb.right - w, innerWidth - w); }           // acima
+  else if (rb.bottom + g + h <= innerHeight - m) { top = rb.bottom + g; left = limitar(rb.right - w, innerWidth - w); } // abaixo
+  else if (rb.left - g - w >= m) { left = rb.left - g - w; top = limitar(rb.bottom - h, innerHeight - h); }     // à esquerda
+  else if (rb.right + g + w <= innerWidth - m) { left = rb.right + g; top = limitar(rb.bottom - h, innerHeight - h); } // à direita
+  else { left = limitar(rb.right - w, innerWidth - w); top = limitar(rb.top - h - g, innerHeight - h); }
+  Object.assign(painel.style, { left: left + "px", top: top + "px", right: "auto", bottom: "auto" });
+}
+// Arrasta a Dili pelo botão ou pelo cabeçalho do painel. Um toque sem movimento conta como clique.
+function arrastavelDili(el, aoClicar) {
+  el.addEventListener("dragstart", (e) => e.preventDefault());
+  el.addEventListener("pointerdown", (e) => {
+    if (e.button !== 0 || (el.tagName !== "BUTTON" && e.target.closest("button"))) return;
+    e.preventDefault(); // evita o arraste nativo do navegador, que cancelaria o movimento
+    const ini = { x: e.clientX, y: e.clientY, ...diliPos() };
+    let moveu = false;
+    el.setPointerCapture(e.pointerId);
+    const mover = (ev) => {
+      const dx = ev.clientX - ini.x, dy = ev.clientY - ini.y;
+      if (!moveu && Math.hypot(dx, dy) < 5) return;
+      moveu = true; document.body.classList.add("dili-arrastando");
+      armazem.gravar("cd.dili.pos", { r: ini.r - dx, b: ini.b - dy });
+      posicionarDili();
+    };
+    const soltar = () => {
+      el.removeEventListener("pointermove", mover); el.removeEventListener("pointerup", soltar); el.removeEventListener("pointercancel", soltar);
+      document.body.classList.remove("dili-arrastando");
+      if (moveu) armazem.gravar("cd.dili.pos", diliPos());
+      else aoClicar?.();
+    };
+    el.addEventListener("pointermove", mover); el.addEventListener("pointerup", soltar); el.addEventListener("pointercancel", soltar);
+  });
+}
+window.addEventListener("resize", () => posicionarDili());
+
 function desenharDili() {
   let raiz = $("#dili-raiz");
   if (!raiz) { raiz = document.createElement("div"); raiz.id = "dili-raiz"; document.body.appendChild(raiz); }
-  if (!estado.base) { raiz.innerHTML = ""; return; }
+  if (!estado.base || !diliNoInicio()) { raiz.innerHTML = ""; dili.aberto = false; return; }
   if (!dili.msgs.length) dili.msgs.push({ de: "bot", html: `Olá, ${esc(primeiroNome())}! Sou a <b>Dili</b>, assistente da Central. Pergunte sobre prazos, alertas, terrenos ou processos.` });
   raiz.innerHTML = `
-    <button class="dili-botao" id="dili-abrir" title="Dili · assistente">${icone(dili.aberto ? "limpar" : "chat")}</button>
+    <button class="dili-botao" id="dili-abrir" title="Dili · assistente (arraste para mover; duplo clique volta ao canto)">${icone(dili.aberto ? "limpar" : "chat")}</button>
     ${dili.aberto ? `<section class="cartao dili" aria-label="Dili">
-      <header><div class="av">${icone("brilho")}</div><div style="flex:1"><b>Dili · Assistente da Central</b><div style="font-size:12px;opacity:.9">🟢 Online · dados de ${esc(fmtDataHora(estado.carregadoEm))} · ${estado.recorte.terrenos.length} terrenos</div></div>
+      <header title="Arraste para mover"><div class="av">${icone("brilho")}</div><div style="flex:1"><b>Dili · Assistente da Central</b><div style="font-size:12px;opacity:.9">🟢 Online · dados de ${esc(fmtDataHora(estado.carregadoEm))} · ${estado.recorte.terrenos.length} terrenos</div></div>
         <button class="btn fant peq" id="dili-limpar" style="color:#fff">Nova conversa</button></header>
       <div class="msgs" id="dili-msgs">${dili.msgs.map((m) => `<div class="msg ${m.de}">${m.html}</div>`).join("")}
         <div class="sug">${DILI_SUG.map((s) => `<button data-sug="${esc(s)}">${esc(s)}</button>`).join("")}</div></div>
       <form id="dili-form"><input class="campo" id="dili-txt" placeholder="Pergunte à Dili…" autocomplete="off"><button class="btn prim">${icone("enviar")}</button></form>
     </section>` : ""}`;
-  $("#dili-abrir").onclick = () => { dili.aberto = !dili.aberto; desenharDili(); $("#dili-txt")?.focus(); };
+  const bt = $("#dili-abrir");
+  arrastavelDili(bt, () => {
+    const agora = Date.now(), duplo = agora - (dili.ultimoClique || 0) < 350;
+    dili.ultimoClique = agora;
+    if (duplo) { armazem.gravar("cd.dili.pos", null); dili.aberto = false; dili.ultimoClique = 0; desenharDili(); return; }
+    dili.aberto = !dili.aberto; desenharDili(); $("#dili-txt")?.focus();
+  });
+  bt.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); dili.aberto = !dili.aberto; desenharDili(); $("#dili-txt")?.focus(); } });
+  posicionarDili();
   if (!dili.aberto) return;
+  arrastavelDili(raiz.querySelector(".dili header"));
   const box = $("#dili-msgs"); box.scrollTop = box.scrollHeight;
   $("#dili-limpar").onclick = () => { dili.msgs = []; desenharDili(); };
   $$("[data-sug]").forEach((b) => (b.onclick = () => perguntarDili(b.dataset.sug)));
